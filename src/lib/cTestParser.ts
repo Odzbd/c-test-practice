@@ -22,7 +22,7 @@ import { FALLBACK_PASSAGES } from './fallbackPassages'
 export interface BlankToken {
   type: 'blank'
   id: string
-  blankIndex: number // 0 to 9
+  blankIndex: number
   prefix: string
   target: string
   fullWord: string
@@ -34,18 +34,7 @@ export interface TextToken {
   content: string
 }
 
-export type CTestToken = BlankToken | TextToken
-
-export interface WikipediaSummaryResponse {
-  title: string
-  extract: string
-  description?: string
-  content_urls?: {
-    desktop?: {
-      page?: string
-    }
-  }
-}
+export type CTestToken = TextToken | BlankToken
 
 export interface CTestPassage {
   title: string
@@ -59,14 +48,26 @@ export interface CTestPassage {
   isFallback?: boolean
 }
 
+export interface WikipediaSummaryResponse {
+  title: string
+  extract: string
+  description?: string
+  content_urls?: {
+    desktop?: {
+      page: string
+    }
+  }
+}
+
 /**
  * Common abbreviations that do not end a sentence
  */
-const ABBREVIATIONS = new Set([
+export const ABBREVIATIONS = new Set([
   'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs', 'etc',
   'eg', 'ie', 'no', 'vol', 'dept', 'approx', 'est', 'jan', 'feb',
   'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
-  'inc', 'ltd', 'corp', 'co', 'univ', 'rep', 'sen', 'gov', 'gen', 'col'
+  'inc', 'ltd', 'corp', 'co', 'univ', 'rep', 'sen', 'gov', 'gen', 'col',
+  'u.s', 'u.k', 'e.u', 'u.n', 'u.s.a', 'd.c', 'b.c', 'a.d', 'a.m', 'p.m'
 ])
 
 /**
@@ -86,7 +87,7 @@ export function sanitizeText(raw: string): string {
 
   // 2. Remove pronunciation guides: (/.../), (IPA: ...), (listen), (pronounced ...)
   text = text.replace(/\(\s*\/[^)]+\/\s*\)/g, '')
-  text = text.replace(/\(\s*(?:IPA|listen|pronounced)[^)]*\)/gi, '')
+  text = text.replace(/\(\s*(?:IPA:?|listen|pronounced)[^)]*\)/gi, '')
   // General phonetic transcription patterns inside parens containing IPA characters
   text = text.replace(/\(\s*[^)]*[əɪʊʌɑæɔpbtdkgfvθðszʃʒhmnŋlrjwˈˌː][^)]*\)/g, '')
 
@@ -117,13 +118,13 @@ export function splitSentences(text: string): string[] {
   let match: RegExpExecArray | null
 
   while ((match = delimiterRegex.exec(trimmed)) !== null) {
-    const delimiter = match[1]
+    const delimiter = match.at(1) || ''
     const delimiterIndex = match.index
     const candidateEnd = delimiterIndex + delimiter.length
     const candidateSentence = trimmed.slice(lastIndex, candidateEnd).trim()
 
     const words = candidateSentence.split(/\s+/)
-    const lastWord = words[words.length - 1]?.toLowerCase().replace(/[()"'[\]]/g, '') || ''
+    const lastWord = words.at(-1)?.toLowerCase().replace(/[()"'[\]]/g, '') || ''
     const cleanLastWord = lastWord.replace(/[.!?]+$/, '')
 
     const isKnownAbbr = ABBREVIATIONS.has(cleanLastWord)
@@ -144,8 +145,10 @@ export function splitSentences(text: string): string[] {
   if (lastIndex < trimmed.length) {
     const trailing = trimmed.slice(lastIndex).trim()
     if (trailing.length > 0) {
-      if (sentences.length > 0 && !/[.!?]$/.test(sentences[sentences.length - 1])) {
-        sentences[sentences.length - 1] += ' ' + trailing
+      const lastSentence = sentences.at(-1)
+      if (sentences.length > 0 && lastSentence && !/[.!?]$/.test(lastSentence)) {
+        const updated = lastSentence + ' ' + trailing
+        sentences.splice(sentences.length - 1, 1, updated)
       } else {
         sentences.push(trailing)
       }
@@ -159,12 +162,13 @@ export function splitSentences(text: string): string[] {
  * Counts total words in a text (splitting on whitespace).
  */
 export function countWords(text: string): number {
-  if (!text.trim()) return 0
+  if (!text || !text.trim()) return 0
   return text.trim().split(/\s+/).length
 }
 
 /**
- * Checks if a token is a purely alphabetic word of length > 1.
+ * Checks if a token is a purely alphabetic word eligible for C-Test counting.
+ * Single letter words (like "a", "I") are ignored to prevent trivial 1-char puzzles.
  */
 export function isEligibleWord(token: string): boolean {
   return /^[a-zA-Z]+$/.test(token) && token.length > 1
@@ -235,7 +239,7 @@ export function tokenizePassage(sanitizedText: string, title?: string): { tokens
     return { tokens: [], blanks: [] }
   }
 
-  const firstSentence = sentences[0]
+  const firstSentence = sentences.at(0) || ''
   const firstSentenceEndIndex = sanitizedText.indexOf(firstSentence) + firstSentence.length
   const s1Part = sanitizedText.slice(0, firstSentenceEndIndex)
   const remainingPart = sanitizedText.slice(firstSentenceEndIndex)
@@ -277,14 +281,12 @@ export function tokenizePassage(sanitizedText: string, title?: string): { tokens
   let alphabeticWordCounter = 0
   let isStartOfSentence = true
 
-  for (let i = 0; i < remainingTokens.length; i++) {
-    const rawToken = remainingTokens[i]
-
+  for (const rawToken of remainingTokens) {
     if (!/^[a-zA-Z]+$/.test(rawToken)) {
       if (/[.!?]/.test(rawToken)) {
         isStartOfSentence = true
       }
-      const lastToken = tokens[tokens.length - 1]
+      const lastToken = tokens.at(-1)
       if (lastToken && lastToken.type === 'text') {
         lastToken.content += rawToken
       } else {
@@ -341,7 +343,7 @@ export function tokenizePassage(sanitizedText: string, title?: string): { tokens
     precedingWords.add(lowerWord)
     isStartOfSentence = false
 
-    const lastToken = tokens[tokens.length - 1]
+    const lastToken = tokens.at(-1)
     if (lastToken && lastToken.type === 'text') {
       lastToken.content += rawToken
     } else {
@@ -360,7 +362,7 @@ export function tokenizePassage(sanitizedText: string, title?: string): { tokens
  */
 export function getFallbackCTestPassage(): CTestPassage {
   const randomIndex = Math.floor(Math.random() * FALLBACK_PASSAGES.length)
-  const item = FALLBACK_PASSAGES[randomIndex]
+  const item = FALLBACK_PASSAGES.at(randomIndex) || FALLBACK_PASSAGES[0]
   const sanitized = sanitizeText(item.extract)
   const validation = validatePassage(sanitized, item.title)
   const { tokens, blanks } = tokenizePassage(sanitized, item.title)
