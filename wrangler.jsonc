@@ -3,7 +3,6 @@
   "name": "c-test-practice",
   "compatibility_date": "2026-08-20",
   "assets": {
-    "directory": "./dist",
-    "binding": "ASSETS"
+    "directory": "./dist"
   }
 }
