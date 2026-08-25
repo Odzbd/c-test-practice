@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   sanitizeText,
   splitSentences,
@@ -7,6 +7,10 @@ import {
   tokenizePassage,
   countWords,
   fetchAndParseCTest,
+  markPassageSeen,
+  isPassageSeen,
+  resetSeenPassages,
+  tryParseSummary,
 } from './cTestParser'
 
 describe('cTestParser - Text Sanitization', () => {
@@ -179,6 +183,10 @@ describe('cTestParser - Passage Validation', () => {
 })
 
 describe('cTestParser - Continuous Dynamic Ingestion', () => {
+  beforeEach(() => {
+    resetSeenPassages()
+  })
+
   it('searches Wikipedia batches continuously and resolves the first valid summary', async () => {
     const invalidShortSummary = {
       title: 'Short Stub',
@@ -188,15 +196,18 @@ describe('cTestParser - Continuous Dynamic Ingestion', () => {
     const validSummary = {
       title: 'Solar System',
       extract:
-        'The solar system consists of the Sun and the astronomical objects bound to it by gravity. ' +
-        'Of the planets that orbit the Sun directly, the largest four are the giant planets, being substantially more massive than the terrestrial planets. ' +
-        'The two largest planets, Jupiter and Saturn, are gas giants, being composed mainly of hydrogen and helium; the two outermost planets, Uranus and Neptune, are ice giants, being composed mostly of volatile substances.',
+        'The Solar System is the gravitationally bound system of the Sun and the objects that orbit it. ' +
+        'Early astronomical models proposed by Nicolaus Copernicus positioned Earth and other planets revolving around a central star within deep space. ' +
+        'Modern scientific space exploration utilizes robotic probes and powerful orbital telescopes to investigate complex planetary atmospheres, rocky moons, and distant icy asteroids located beyond Neptune.',
       content_urls: { desktop: { page: 'https://simple.wikipedia.org/wiki/Solar_System' } },
     }
 
     let callCount = 0
     const originalFetch = globalThis.fetch
-    globalThis.fetch = vi.fn().mockImplementation(async () => {
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (typeof url === 'string' && url.includes('/feed/featured/')) {
+        return { ok: false, status: 404, json: async () => ({}) }
+      }
       callCount++
       if (callCount < 4) {
         return {
@@ -215,8 +226,7 @@ describe('cTestParser - Continuous Dynamic Ingestion', () => {
     let reportedAttempts = 0
     let lastEvaluatedCount = 0
     const passage = await fetchAndParseCTest({
-      maxBatches: 5,
-      batchSize: 3,
+      batchSize: 2,
       onRetry: (attempt, _reason, totalEvaluated) => {
         reportedAttempts = attempt
         lastEvaluatedCount = totalEvaluated
@@ -235,24 +245,116 @@ describe('cTestParser - Continuous Dynamic Ingestion', () => {
     const originalFetch = globalThis.fetch
     globalThis.fetch = vi.fn().mockImplementation(async () => {
       await new Promise(r => setTimeout(r, 50))
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ title: 'Stub', extract: 'Short.' }),
-      }
+      return { ok: true, status: 200, json: async () => ({}) }
     }) as any
 
     const controller = new AbortController()
-    setTimeout(() => controller.abort(), 20)
+    controller.abort()
 
-    await expect(
-      fetchAndParseCTest({
-        maxBatches: 10,
-        batchSize: 2,
-        signal: controller.signal,
-      })
-    ).rejects.toThrow()
+    await expect(fetchAndParseCTest({ signal: controller.signal })).rejects.toThrow(
+      'Passage fetch aborted'
+    )
 
     globalThis.fetch = originalFetch
+  })
+
+  it('resolves immediately on the first valid passage without waiting for slower in-flight requests', async () => {
+    resetSeenPassages()
+    const validFastSummary = {
+      title: 'Copernican Astronomy',
+      extract:
+        'The Copernican model is the gravitationally bound system of the Sun and the objects that orbit it. ' +
+        'Early astronomical models proposed by Nicolaus Copernicus positioned Earth and other planets revolving around a central star within deep space. ' +
+        'Modern scientific space exploration utilizes robotic probes and powerful orbital telescopes to investigate complex planetary atmospheres, rocky moons, and distant icy asteroids located beyond Neptune.',
+      content_urls: { desktop: { page: 'https://simple.wikipedia.org/wiki/Copernican_Astronomy' } },
+    }
+
+    const validSlowSummary = {
+      title: 'Jupiter Magnetosphere',
+      extract:
+        'Jupiter is the fifth planet from the Sun and the largest gas giant in the entire Solar System. ' +
+        'It possesses a planetary mass more than two and a half times that of all the other planets combined within our stellar neighborhood. ' +
+        'Astronomers utilize large ground observatories and interplanetary robotic probes to measure complex magnetic radiation across the planetary magnetosphere and distant orbital rings.',
+      content_urls: { desktop: { page: 'https://simple.wikipedia.org/wiki/Jupiter_Magnetosphere' } },
+    }
+
+    const extraPassages: string[] = []
+    const originalFetch = globalThis.fetch
+    let requestIdx = 0
+
+    globalThis.fetch = vi.fn().mockImplementation(async () => {
+      const idx = requestIdx++
+      if (idx === 0) {
+        // Fast response (10ms)
+        await new Promise(r => setTimeout(r, 10))
+        return {
+          ok: true,
+          status: 200,
+          json: async () => validFastSummary,
+        }
+      }
+      // Slower response (100ms)
+      await new Promise(r => setTimeout(r, 100))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => validSlowSummary,
+      }
+    }) as any
+
+    const startTime = Date.now()
+    const passage = await fetchAndParseCTest({
+      batchSize: 3,
+      onExtraPassageFound: (extra) => {
+        extraPassages.push(extra.title)
+      },
+    })
+    const elapsed = Date.now() - startTime
+
+    // Must resolve immediately with the fast summary (well before 100ms)
+    expect(passage.title).toBe('Copernican Astronomy')
+    expect(elapsed).toBeLessThan(90)
+
+    // Wait for slower in-flight request to complete and trigger onExtraPassageFound
+    await new Promise(r => setTimeout(r, 120))
+    expect(extraPassages).toContain('Jupiter Magnetosphere')
+
+    globalThis.fetch = originalFetch
+  })
+})
+
+describe('cTestParser - Level 1 Session Seen Passages Filter', () => {
+  beforeEach(() => {
+    resetSeenPassages()
+  })
+
+  it('tracks seen passage titles and prevents duplicate passages in the same session', () => {
+    expect(isPassageSeen('Photosynthesis')).toBe(false)
+    markPassageSeen('Photosynthesis')
+    expect(isPassageSeen('Photosynthesis')).toBe(true)
+    expect(isPassageSeen('photosynthesis')).toBe(true) // case-insensitive
+
+    const sampleSummary = {
+      title: 'Photosynthesis',
+      extract:
+        'Photosynthesis is a biological process used by plants and other organisms to convert light energy into chemical energy. ' +
+        'This chemical energy is stored in carbohydrate molecules such as sugars and starches, which are synthesized from carbon dioxide and water. ' +
+        'Most plants and algae perform photosynthesis using light absorbed by chlorophyll pigments in cellular organelles called chloroplasts. ' +
+        'Oxygen is also released as a byproduct of this crucial reaction.',
+      content_urls: { desktop: { page: 'https://simple.wikipedia.org/wiki/Photosynthesis' } },
+    }
+
+    // Attempting to parse an already-seen passage should be rejected
+    const result = tryParseSummary(sampleSummary)
+    expect('reason' in result).toBe(true)
+    if ('reason' in result) {
+      expect(result.reason).toContain('Already completed in session')
+    }
+
+    // Resetting seen passages allows it again
+    resetSeenPassages()
+    expect(isPassageSeen('Photosynthesis')).toBe(false)
+    const freshResult = tryParseSummary(sampleSummary)
+    expect('passage' in freshResult).toBe(true)
   })
 })

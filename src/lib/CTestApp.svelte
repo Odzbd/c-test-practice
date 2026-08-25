@@ -5,6 +5,10 @@
     type CTestPassage,
     type BlankToken,
   } from './cTestParser'
+  import {
+    fetchWordDefinition,
+    type DictionaryEntry,
+  } from './dictionaryService'
   import confetti from 'canvas-confetti'
 
   let darkMode = $state(false)
@@ -37,7 +41,12 @@
     explanation: string
   }
   let diagnostics = $state<DiagnosticItem[]>([])
-  let selectedGlossaryWord = $state<{ word: string; prefix?: string; target?: string; fullWord?: string; explanation?: string } | null>(null)
+  
+  // Lexical Inspector State
+  let activeInspectorEntry = $state<DictionaryEntry | null>(null)
+  let inspectorWordStatus = $state<'correct' | 'near-miss' | 'incomplete' | 'incorrect' | 'untested'>('untested')
+  let inspectorContextSentence = $state<string>('')
+  let isPlayingAudio = $state(false)
 
   // Session Statistics (Kept in Browser RAM only)
   let sessionStats = $state({
@@ -111,16 +120,24 @@
   let passageBuffer: CTestPassage[] = []
   let isPrefetching = false
 
+  function addToBuffer(newPassage: CTestPassage) {
+    if (passageBuffer.length >= BUFFER_TARGET_SIZE) return
+    if (passage?.title === newPassage.title) return
+    if (passageBuffer.some(p => p.title === newPassage.title)) return
+    passageBuffer.push(newPassage)
+  }
+
   async function prefetchNextPassages() {
     if (isPrefetching || passageBuffer.length >= BUFFER_TARGET_SIZE) return
     isPrefetching = true
     try {
       const next = await fetchAndParseCTest({
         maxBatches: 5,
-        batchSize: 3,
+        batchSize: 2,
+        onExtraPassageFound: addToBuffer,
       })
-      if (next && !passageBuffer.some(p => p.title === next.title) && passage?.title !== next.title) {
-        passageBuffer.push(next)
+      if (next) {
+        addToBuffer(next)
       }
     } catch {
       // Background prefetch errors are safely ignored
@@ -141,7 +158,7 @@
     activeBlankIndex = 0
     userAnswers = Array(10).fill('')
     diagnostics = []
-    selectedGlossaryWord = null
+    activeInspectorEntry = null
 
     // 1. Instant load from pre-fetch queue if available
     if (passageBuffer.length > 0) {
@@ -156,7 +173,7 @@
       return
     }
 
-    // 2. Real-time continuous fetch from Wikipedia if buffer is empty
+    // 2. Real-time immediate render on first valid Wikipedia passage found
     loading = true
     try {
       const result = await fetchAndParseCTest({
@@ -166,6 +183,7 @@
           retryAttempt = batch
           retryMessage = `Searching Simple English Wikipedia (Batch ${batch}, ${totalEvaluated} articles evaluated)...`
         },
+        onExtraPassageFound: addToBuffer,
       })
       passage = result
       loading = false
@@ -224,7 +242,11 @@
       }
     } else if (e.key === 'Enter') {
       e.preventDefault()
-      gradePassage()
+      if (index < 9) {
+        inputRefs[index + 1]?.focus()
+      } else {
+        gradePassage()
+      }
     } else if (e.key === 'ArrowRight') {
       const input = inputRefs[index]
       if (input && input.selectionStart === input.value.length && index < 9) {
@@ -288,6 +310,9 @@
     diagnostics = diagList
     isGraded = true
 
+    // Priority-Queue Warmup: Preload missed words first, then correct words in background
+    preloadPassageDictionary(diagList)
+
     // Update RAM session stats
     sessionStats.passagesCompleted++
     sessionStats.totalCorrectBlanks += correctCount
@@ -316,6 +341,27 @@
     }
   }
 
+  function preloadPassageDictionary(diagList: DiagnosticItem[]) {
+    if (!passage) return
+    const missed = diagList.filter(d => d.status !== 'correct')
+    const correct = diagList.filter(d => d.status === 'correct')
+
+    // 1. High Priority: Warm up missed words immediately for 0ms inspector display
+    for (const d of missed) {
+      const b = passage.blanks[d.blankIndex]
+      if (b) fetchWordDefinition(b.fullWord, b.prefix, b.target).catch(() => {})
+    }
+
+    // 2. Background Warmup: Warm up remaining correct words seamlessly
+    setTimeout(() => {
+      if (!passage) return
+      for (const d of correct) {
+        const b = passage.blanks[d.blankIndex]
+        if (b) fetchWordDefinition(b.fullWord, b.prefix, b.target).catch(() => {})
+      }
+    }, 150)
+  }
+
   function isBlankCorrect(index: number): boolean {
     if (!passage || !isGraded) return false
     const answer = (userAnswers[index] || '').trim().toLowerCase()
@@ -338,14 +384,64 @@
     }
   }
 
-  function openGlossary(blank: BlankToken) {
-    if (!isGraded) return
-    selectedGlossaryWord = {
-      word: blank.fullWord,
-      prefix: blank.prefix,
-      target: blank.target,
-      fullWord: blank.fullWord,
-      explanation: `Prefix preserved: "${blank.prefix}" • Target suffix: "${blank.target}" (${blank.expectedLength} letters)`,
+  function playWordAudio(word: string, audioUrl?: string) {
+    if (audioUrl) {
+      try {
+        const audio = new Audio(audioUrl)
+        isPlayingAudio = true
+        audio.onended = () => { isPlayingAudio = false }
+        audio.onerror = () => { speakUS(word) }
+        audio.play().catch(() => { speakUS(word) })
+        return
+      } catch {
+        speakUS(word)
+        return
+      }
+    }
+    speakUS(word)
+  }
+
+  function speakUS(word: string) {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel()
+      const utterance = new SpeechSynthesisUtterance(word)
+      utterance.lang = 'en-US'
+      utterance.rate = 0.9
+
+      const voices = window.speechSynthesis.getVoices()
+      const usVoice = voices.find(v => v.lang === 'en-US' || v.lang === 'en_US' || v.name.includes('US') || v.name.includes('United States'))
+      if (usVoice) utterance.voice = usVoice
+
+      isPlayingAudio = true
+      utterance.onend = () => { isPlayingAudio = false }
+      utterance.onerror = () => { isPlayingAudio = false }
+      window.speechSynthesis.speak(utterance)
+    }
+  }
+
+  async function openGlossary(blank: BlankToken) {
+    let status: 'correct' | 'near-miss' | 'incomplete' | 'incorrect' | 'untested' = 'untested'
+    if (isGraded) {
+      const diag = diagnostics.find(d => d.blankIndex === blank.blankIndex)
+      status = diag?.status || (isBlankCorrect(blank.blankIndex) ? 'correct' : 'incorrect')
+    }
+
+    // Extract in-context sentence snippet from passage
+    let sentenceSnippet = ''
+    if (passage) {
+      const sentences = passage.sanitizedText.split(/(?<=[.?!])\s+/)
+      const found = sentences.find(s => s.toLowerCase().includes(blank.fullWord.toLowerCase()))
+      sentenceSnippet = found || ''
+    }
+
+    inspectorWordStatus = status
+    inspectorContextSentence = sentenceSnippet
+
+    try {
+      const entry = await fetchWordDefinition(blank.fullWord, blank.prefix, blank.target)
+      activeInspectorEntry = entry
+    } catch {
+      // Graceful fallback is handled within fetchWordDefinition
     }
   }
 
@@ -592,28 +688,32 @@
             {@const currentAnswer = userAnswers[token.blankIndex] || ''}
             {@const isFocused = activeBlankIndex === token.blankIndex}
             
-            <span class="inline-flex items-baseline mx-0.5 my-1 align-baseline select-none">
+            <span class="inline-flex items-stretch mx-0.5 my-1 align-baseline select-none">
               <!-- Prefix segment (intact half) -->
               {#if isGraded}
                 <button
                   type="button"
                   onclick={() => openGlossary(token)}
-                  class="font-mono font-bold text-slate-900 dark:text-slate-100 bg-slate-200/90 dark:bg-slate-800/90 px-1.5 py-0.5 rounded-l text-sm sm:text-base border-y border-l border-slate-300 dark:border-slate-700 cursor-pointer hover:bg-slate-300 dark:hover:bg-slate-700"
+                  class="font-mono font-bold text-slate-900 dark:text-slate-100 bg-slate-200/90 dark:bg-slate-800/90 pl-1.5 pr-0.5 py-0.5 rounded-l text-sm sm:text-base border-y border-l border-slate-300 dark:border-slate-700 cursor-pointer hover:bg-slate-300 dark:hover:bg-slate-700 inline-flex items-center"
                   title="Click to view lexical breakdown"
                 >
                   {token.prefix}
                 </button>
               {:else}
-                <span
-                  class="font-mono font-bold text-slate-900 dark:text-slate-100 bg-slate-200/90 dark:bg-slate-800/90 px-1.5 py-0.5 rounded-l text-sm sm:text-base border-y border-l border-slate-300 dark:border-slate-700"
+                <button
+                  type="button"
+                  onclick={() => inputRefs[token.blankIndex]?.focus()}
+                  tabindex="-1"
+                  class="font-mono font-bold text-slate-900 dark:text-slate-100 bg-slate-200/90 dark:bg-slate-800/90 pl-1.5 pr-0.5 py-0.5 rounded-l text-sm sm:text-base border-y border-l border-slate-300 dark:border-slate-700 cursor-text inline-flex items-center select-none"
+                  title="Click to focus blank"
                 >
                   {token.prefix}
-                </span>
+                </button>
               {/if}
               
               <!-- Blank Input Box with Underline Dash Slots -->
               <span
-                class="relative inline-flex items-center px-1.5 py-0.5 rounded-r border-y border-r transition-all duration-150 {
+                class="relative inline-flex items-center pl-0.5 pr-1.5 py-0.5 rounded-r border-y border-r transition-all duration-150 {
                   isGraded
                     ? isCorrect
                       ? 'bg-emerald-50/80 dark:bg-emerald-950/40 border-emerald-500'
@@ -638,6 +738,7 @@
                   autocorrect="off"
                   spellcheck="false"
                   inputmode="text"
+                  enterkeyhint={token.blankIndex === 9 ? 'done' : 'next'}
                   disabled={isGraded}
                   aria-label={`Blank ${token.blankIndex + 1} of 10, word begins with ${token.prefix}, requires ${token.expectedLength} letters`}
                   class="absolute inset-0 w-full h-full opacity-0 cursor-text z-10"
@@ -711,7 +812,7 @@
           <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
             <span class="hidden sm:inline">Tip: Press</span>
             <kbd class="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 font-mono text-[11px]">Enter</kbd>
-            <span>to submit •</span>
+            <span>for next blank (submit on last) •</span>
             <kbd class="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 font-mono text-[11px]">Backspace</kbd>
             <span>to go back</span>
           </div>
@@ -750,7 +851,7 @@
                     </span>
                   </div>
                   <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                    Completed in {formatTime(elapsedSeconds)} ({Math.round(elapsedSeconds / 10)}s / blank avg) • Click any word for lexical breakdown
+                    Completed in {formatTime(elapsedSeconds)} ({Math.round(elapsedSeconds / 10)}s / blank avg) • Click any word for definition & pronunciation
                   </p>
                 </div>
               </div>
@@ -766,19 +867,31 @@
 
             <!-- Cognitive Scaffolding: Diagnostic Error Breakdown Table -->
             <div class="border-t border-slate-200 dark:border-slate-800/80 pt-3">
-              <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-2">
-                Psychometric Diagnostic Breakdown
-              </h4>
+              <div class="flex items-center justify-between mb-2">
+                <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                  Psychometric Diagnostic Breakdown
+                </h4>
+                <span class="text-[11px] text-indigo-600 dark:text-indigo-400 font-medium">
+                  Click any word for definition & pronunciation
+                </span>
+              </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {#each diagnostics as item}
-                  <div class="flex items-start justify-between gap-2 p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs">
+                  <button
+                    type="button"
+                    onclick={() => {
+                      const b = passage?.blanks[item.blankIndex]
+                      if (b) openGlossary(b)
+                    }}
+                    class="flex items-start justify-between gap-2 p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs text-left cursor-pointer hover:border-indigo-400 dark:hover:border-indigo-600 hover:shadow-xs transition-all"
+                  >
                     <div>
                       <div class="flex items-center gap-1.5 font-mono">
                         <span class="font-bold text-slate-900 dark:text-white">{item.prefix}<strong>{item.target}</strong></span>
                         {#if item.status === 'correct'}
                           <span class="text-emerald-600 dark:text-emerald-400 font-semibold">✓</span>
                         {:else}
-                          <span class="text-rose-500 line-through">{item.prefix}{item.userAnswer || '___'}</span>
+                          <span class="text-rose-500 line-through">{item.prefix}{item.userAnswer || '_'.repeat(item.target.length)}</span>
                         {/if}
                       </div>
                       <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">{item.explanation}</p>
@@ -792,7 +905,7 @@
                     }">
                       {item.status}
                     </span>
-                  </div>
+                  </button>
                 {/each}
               </div>
             </div>
@@ -803,54 +916,119 @@
 
   </main>
 
-  <!-- Interactive Lexical Glossary Modal (When clicking words after test) -->
-  {#if selectedGlossaryWord}
+  <!-- Interactive Lexical Diagnostic & Dictionary Inspector Modal -->
+  {#if activeInspectorEntry}
     <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl flex flex-col gap-4 animate-in fade-in zoom-in duration-150">
-        <div class="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
-          <div>
-            <span class="text-xs uppercase tracking-wider text-indigo-600 dark:text-indigo-400 font-bold">Lexical Breakdown</span>
-            <h3 class="text-xl font-mono font-extrabold text-slate-900 dark:text-white">
-              {selectedGlossaryWord.fullWord || selectedGlossaryWord.word}
-            </h3>
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl flex flex-col gap-4 animate-in fade-in zoom-in duration-150 max-h-[90vh] overflow-y-auto">
+        <!-- Header -->
+        <div class="flex items-start justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+          <div class="space-y-1">
+            <div class="flex flex-wrap items-center gap-1.5">
+              <span class="px-2 py-0.5 text-[11px] font-bold font-mono uppercase tracking-wider rounded-md {
+                inspectorWordStatus === 'correct'
+                  ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
+                  : inspectorWordStatus === 'near-miss'
+                    ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800'
+                    : inspectorWordStatus === 'incorrect' || inspectorWordStatus === 'incomplete'
+                      ? 'bg-rose-50 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-200 dark:border-rose-800'
+                      : 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800'
+              }">
+                {inspectorWordStatus === 'untested' ? 'Academic Word' : inspectorWordStatus}
+              </span>
+              <span class="px-2 py-0.5 text-[11px] font-bold rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
+                {activeInspectorEntry.cefrDescription}
+              </span>
+            </div>
+
+            <div class="flex items-center gap-2.5 pt-1">
+              <h3 class="text-2xl font-mono font-extrabold text-slate-900 dark:text-white">
+                {activeInspectorEntry.word}
+              </h3>
+              {#if activeInspectorEntry.phonetic && activeInspectorEntry.phonetic !== `/${activeInspectorEntry.word}/`}
+                <span class="text-xs font-mono text-slate-400 dark:text-slate-500">
+                  {activeInspectorEntry.phonetic}
+                </span>
+              {/if}
+              <button
+                type="button"
+                onclick={() => playWordAudio(activeInspectorEntry?.word || '', activeInspectorEntry?.audioUrl)}
+                class="px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900 border border-indigo-200 dark:border-indigo-800 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                title="Listen to American English pronunciation"
+              >
+                {#if isPlayingAudio}
+                  <span class="animate-pulse">🔊 Playing...</span>
+                {:else}
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/>
+                  </svg>
+                  <span>Listen</span>
+                {/if}
+              </button>
+            </div>
           </div>
+
           <button
-            onclick={() => selectedGlossaryWord = null}
-            class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-1 cursor-pointer"
+            onclick={() => activeInspectorEntry = null}
+            class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-1.5 rounded-lg cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800"
           >
             ✕
           </button>
         </div>
 
-        <div class="space-y-3 text-sm text-slate-600 dark:text-slate-300">
-          {#if selectedGlossaryWord.prefix && selectedGlossaryWord.target}
-            <div class="p-3 bg-slate-50 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800 font-mono text-xs space-y-1">
-              <div class="flex justify-between">
-                <span class="text-slate-400">Intact Prefix (ceil L/2):</span>
-                <span class="font-bold text-slate-900 dark:text-white">{selectedGlossaryWord.prefix}</span>
+        <!-- Definition & Meaning -->
+        <div class="space-y-3">
+          <div>
+            <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-1.5">
+              Definitions & Meanings
+            </h4>
+            {#if activeInspectorEntry.meanings && activeInspectorEntry.meanings.length > 0}
+              <div class="space-y-2">
+                {#each activeInspectorEntry.meanings as item}
+                  <div class="text-sm text-slate-800 dark:text-slate-200 leading-relaxed font-medium flex items-start gap-2">
+                    <span class="font-mono font-bold text-[11px] text-indigo-600 dark:text-indigo-400 italic bg-indigo-50 dark:bg-indigo-950/60 px-1.5 py-0.5 rounded border border-indigo-200/60 dark:border-indigo-800/40 shrink-0 mt-0.5 select-none">
+                      {item.pos}
+                    </span>
+                    <div class="flex-1">
+                      <span>{item.definition}</span>
+                      {#if item.example}
+                        <p class="text-xs italic text-slate-500 dark:text-slate-400 mt-0.5 pl-2.5 border-l-2 border-indigo-300 dark:border-indigo-700">
+                          "{item.example}"
+                        </p>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
               </div>
-              <div class="flex justify-between">
-                <span class="text-slate-400">Target Blank (floor L/2):</span>
-                <span class="font-bold text-indigo-600 dark:text-indigo-400">{selectedGlossaryWord.target}</span>
-              </div>
-              <div class="flex justify-between">
-                <span class="text-slate-400">Total Word Length:</span>
-                <span>{(selectedGlossaryWord.prefix + selectedGlossaryWord.target).length} letters</span>
+            {:else}
+              <p class="text-sm text-slate-800 dark:text-slate-200 leading-relaxed font-medium">
+                {activeInspectorEntry.definition}
+              </p>
+            {/if}
+          </div>
+
+          <!-- Academic Synonyms -->
+          {#if activeInspectorEntry.synonyms.length > 0}
+            <div>
+              <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-1.5">
+                Academic Synonyms
+              </h4>
+              <div class="flex flex-wrap gap-1.5">
+                {#each activeInspectorEntry.synonyms as syn}
+                  <span class="px-2 py-0.5 text-xs font-mono rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
+                    {syn}
+                  </span>
+                {/each}
               </div>
             </div>
           {/if}
-
-          <p class="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-            {selectedGlossaryWord.explanation || 'Analyzed according to standard C-Test psychometric morphology rules.'}
-          </p>
         </div>
 
-        <div class="flex justify-end pt-2">
+        <div class="flex justify-end pt-2 border-t border-slate-100 dark:border-slate-800">
           <button
-            onclick={() => selectedGlossaryWord = null}
-            class="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors cursor-pointer"
+            onclick={() => activeInspectorEntry = null}
+            class="px-5 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors cursor-pointer"
           >
-            Close
+            Close Inspector
           </button>
         </div>
       </div>
