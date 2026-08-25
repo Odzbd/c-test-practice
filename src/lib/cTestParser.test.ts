@@ -7,7 +7,6 @@ import {
   tokenizePassage,
   countWords,
   fetchAndParseCTest,
-  getFallbackCTestPassage,
 } from './cTestParser'
 
 describe('cTestParser - Text Sanitization', () => {
@@ -179,16 +178,8 @@ describe('cTestParser - Passage Validation', () => {
   })
 })
 
-describe('cTestParser - Fallback Bank and Parallel Ingestion', () => {
-  it('generates a valid C-Test passage from the in-memory fallback bank', () => {
-    const fallback = getFallbackCTestPassage()
-    expect(fallback.blanks).toHaveLength(10)
-    expect(fallback.sentenceCount).toBeGreaterThanOrEqual(3)
-    expect(fallback.totalWordCount).toBeGreaterThanOrEqual(60)
-    expect(fallback.isFallback).toBe(true)
-  })
-
-  it('uses parallel batch fetching and resolves the first valid summary', async () => {
+describe('cTestParser - Continuous Dynamic Ingestion', () => {
+  it('searches Wikipedia batches continuously and resolves the first valid summary', async () => {
     const invalidShortSummary = {
       title: 'Short Stub',
       extract: 'This is too short. It only has two sentences.',
@@ -207,7 +198,7 @@ describe('cTestParser - Fallback Bank and Parallel Ingestion', () => {
     const originalFetch = globalThis.fetch
     globalThis.fetch = vi.fn().mockImplementation(async () => {
       callCount++
-      if (callCount % 3 !== 0) {
+      if (callCount < 4) {
         return {
           ok: true,
           status: 200,
@@ -221,30 +212,46 @@ describe('cTestParser - Fallback Bank and Parallel Ingestion', () => {
       }
     }) as any
 
+    let reportedAttempts = 0
+    let lastEvaluatedCount = 0
     const passage = await fetchAndParseCTest({
-      maxBatches: 2,
+      maxBatches: 5,
       batchSize: 3,
-      allowFallback: true,
+      onRetry: (attempt, _reason, totalEvaluated) => {
+        reportedAttempts = attempt
+        lastEvaluatedCount = totalEvaluated
+      },
     })
 
     expect(passage.title).toBe('Solar System')
     expect(passage.blanks).toHaveLength(10)
+    expect(reportedAttempts).toBeGreaterThanOrEqual(1)
+    expect(lastEvaluatedCount).toBeGreaterThanOrEqual(3)
 
     globalThis.fetch = originalFetch
   })
 
-  it('smoothly returns a fallback passage when network fails completely', async () => {
+  it('aborts promptly when AbortSignal is triggered', async () => {
     const originalFetch = globalThis.fetch
-    globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network offline')) as any
+    globalThis.fetch = vi.fn().mockImplementation(async () => {
+      await new Promise(r => setTimeout(r, 50))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ title: 'Stub', extract: 'Short.' }),
+      }
+    }) as any
 
-    const passage = await fetchAndParseCTest({
-      maxBatches: 1,
-      batchSize: 1,
-      allowFallback: true,
-    })
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 20)
 
-    expect(passage.isFallback).toBe(true)
-    expect(passage.blanks).toHaveLength(10)
+    await expect(
+      fetchAndParseCTest({
+        maxBatches: 10,
+        batchSize: 2,
+        signal: controller.signal,
+      })
+    ).rejects.toThrow()
 
     globalThis.fetch = originalFetch
   })

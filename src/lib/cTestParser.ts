@@ -1,7 +1,7 @@
 /**
  * English "Complete the Words" (C-Test) Parser & Ingestion Engine
  * 
- * Strict C-Test Rules & High-Performance Architecture:
+ * Strict C-Test Rules & Dynamic Real-Time Ingestion:
  * 1. 1st sentence is 100% intact to provide full context.
  * 2. Starting sentence 2 onward, evaluate words sequentially and truncate every 2nd eligible word.
  * 3. Only purely alphabetic words (/^[a-zA-Z]+$/) with length > 1 qualify for counting & truncation.
@@ -12,15 +12,13 @@
  *    - Never truncate Proper Nouns (capitalized words inside sentences, e.g. "Redfoo", "London").
  *    - Never truncate words from the article title.
  *    - All 10 blanks must be mutually unique.
- * 7. Fast Parallel Ingestion & Curated Fallback:
- *    - Uses parallel batch fetching (3 concurrent requests) to find valid passages in <300ms.
- *    - Seamlessly falls back to curated in-memory passages if Wikipedia is slow or fails.
+ * 7. 100% Dynamic Wikipedia Ingestion:
+ *    - Does not store static text locally.
+ *    - Fetches parallel batches continuously until an authentic Wikipedia article meets all strict constraints.
  */
 
-import { FALLBACK_PASSAGES } from './fallbackPassages'
-
 export interface BlankToken {
-  type: 'blank'
+  type: "blank"
   id: string
   blankIndex: number
   prefix: string
@@ -30,7 +28,7 @@ export interface BlankToken {
 }
 
 export interface TextToken {
-  type: 'text'
+  type: "text"
   content: string
 }
 
@@ -45,7 +43,6 @@ export interface CTestPassage {
   totalWordCount: number
   tokens: CTestToken[]
   blanks: BlankToken[]
-  isFallback?: boolean
 }
 
 export interface WikipediaSummaryResponse {
@@ -63,11 +60,11 @@ export interface WikipediaSummaryResponse {
  * Common abbreviations that do not end a sentence
  */
 export const ABBREVIATIONS = new Set([
-  'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs', 'etc',
-  'eg', 'ie', 'no', 'vol', 'dept', 'approx', 'est', 'jan', 'feb',
-  'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
-  'inc', 'ltd', 'corp', 'co', 'univ', 'rep', 'sen', 'gov', 'gen', 'col',
-  'u.s', 'u.k', 'e.u', 'u.n', 'u.s.a', 'd.c', 'b.c', 'a.d', 'a.m', 'p.m'
+  "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc",
+  "eg", "ie", "no", "vol", "dept", "approx", "est", "jan", "feb",
+  "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+  "inc", "ltd", "corp", "co", "univ", "rep", "sen", "gov", "gen", "col",
+  "u.s", "u.k", "e.u", "u.n", "u.s.a", "d.c", "b.c", "a.d", "a.m", "p.m"
 ])
 
 /**
@@ -78,28 +75,28 @@ export const ABBREVIATIONS = new Set([
  * - Normalizes excessive whitespace
  */
 export function sanitizeText(raw: string): string {
-  if (!raw) return ''
+  if (!raw) return ""
 
   let text = raw
 
   // 1. Remove bracketed citations: [1], [12], [a], [note 1], [citation needed], etc.
-  text = text.replace(/\[\s*(?:\d+|[a-zA-Z]|note\s+\d+|citation\s+needed|edit)\s*\]/gi, '')
+  text = text.replace(/\[\s*(?:\d+|[a-zA-Z]|note\s+\d+|citation\s+needed|edit)\s*\]/gi, "")
 
   // 2. Remove pronunciation guides: (/.../), (IPA: ...), (listen), (pronounced ...)
-  text = text.replace(/\(\s*\/[^)]+\/\s*\)/g, '')
-  text = text.replace(/\(\s*(?:IPA:?|listen|pronounced)[^)]*\)/gi, '')
+  text = text.replace(/\(\s*\/[^)]+\/\s*\)/g, "")
+  text = text.replace(/\(\s*(?:IPA:?|listen|pronounced)[^)]*\)/gi, "")
   // General phonetic transcription patterns inside parens containing IPA characters
-  text = text.replace(/\(\s*[^)]*[əɪʊʌɑæɔpbtdkgfvθðszʃʒhmnŋlrjwˈˌː][^)]*\)/g, '')
+  text = text.replace(/\(\s*[^)]*[əɪʊʌɑæɔpbtdkgfvθðszʃʒhmnŋlrjwˈˌː][^)]*\)/g, "")
 
   // 3. Remove any empty leftover parentheses or brackets
-  text = text.replace(/\(\s*\)/g, '')
-  text = text.replace(/\[\s*\]/g, '')
+  text = text.replace(/\(\s*\)/g, "")
+  text = text.replace(/\[\s*\]/g, "")
 
   // 4. Normalize spaces around punctuation
-  text = text.replace(/\s+([.,!?;:])/g, '$1')
+  text = text.replace(/\s+([.,!?;:])/g, "$1")
 
   // 5. Normalize whitespace to single spaces and trim
-  text = text.replace(/\s+/g, ' ').trim()
+  text = text.replace(/\s+/g, " ").trim()
 
   return text
 }
@@ -118,14 +115,14 @@ export function splitSentences(text: string): string[] {
   let match: RegExpExecArray | null
 
   while ((match = delimiterRegex.exec(trimmed)) !== null) {
-    const delimiter = match.at(1) || ''
+    const delimiter = match.at(1) || ""
     const delimiterIndex = match.index
     const candidateEnd = delimiterIndex + delimiter.length
     const candidateSentence = trimmed.slice(lastIndex, candidateEnd).trim()
 
     const words = candidateSentence.split(/\s+/)
-    const lastWord = words.at(-1)?.toLowerCase().replace(/[()"'[\]]/g, '') || ''
-    const cleanLastWord = lastWord.replace(/[.!?]+$/, '')
+    const lastWord = words.at(-1)?.toLowerCase().replace(/[()"\[\]]/g, "") || ""
+    const cleanLastWord = lastWord.replace(/[.!?]+$/, "")
 
     const isKnownAbbr = ABBREVIATIONS.has(cleanLastWord)
     const isSingleInitial = /^[a-z]$/i.test(cleanLastWord)
@@ -147,7 +144,7 @@ export function splitSentences(text: string): string[] {
     if (trailing.length > 0) {
       const lastSentence = sentences.at(-1)
       if (sentences.length > 0 && lastSentence && !/[.!?]$/.test(lastSentence)) {
-        const updated = lastSentence + ' ' + trailing
+        const updated = lastSentence + " " + trailing
         sentences.splice(sentences.length - 1, 1, updated)
       } else {
         sentences.push(trailing)
@@ -189,7 +186,7 @@ export function validatePassage(text: string, title?: string): { valid: boolean;
   if (sentenceCount < 3) {
     return {
       valid: false,
-      reason: `Insufficient sentences: found ${sentenceCount}, required >= 3`,
+      reason: "Insufficient sentences: found " + sentenceCount + ", required >= 3",
       sentenceCount,
       totalWords,
     }
@@ -198,7 +195,7 @@ export function validatePassage(text: string, title?: string): { valid: boolean;
   if (totalWords < 60 || totalWords > 130) {
     return {
       valid: false,
-      reason: `Word count out of range: ${totalWords} words (required: 60-130)`,
+      reason: "Word count out of range: " + totalWords + " words (required: 60-130)",
       sentenceCount,
       totalWords,
     }
@@ -208,7 +205,7 @@ export function validatePassage(text: string, title?: string): { valid: boolean;
   if (blanks.length < 10) {
     return {
       valid: false,
-      reason: `Generated only ${blanks.length} unique non-referential blanks, required 10`,
+      reason: "Generated only " + blanks.length + " unique non-referential blanks, required 10",
       sentenceCount,
       totalWords,
     }
@@ -239,7 +236,7 @@ export function tokenizePassage(sanitizedText: string, title?: string): { tokens
     return { tokens: [], blanks: [] }
   }
 
-  const firstSentence = sentences.at(0) || ''
+  const firstSentence = sentences.at(0) || ""
   const firstSentenceEndIndex = sanitizedText.indexOf(firstSentence) + firstSentence.length
   const s1Part = sanitizedText.slice(0, firstSentenceEndIndex)
   const remainingPart = sanitizedText.slice(firstSentenceEndIndex)
@@ -271,7 +268,7 @@ export function tokenizePassage(sanitizedText: string, title?: string): { tokens
 
   // Sentence 1 is 100% intact
   tokens.push({
-    type: 'text',
+    type: "text",
     content: s1Part,
   })
 
@@ -287,10 +284,10 @@ export function tokenizePassage(sanitizedText: string, title?: string): { tokens
         isStartOfSentence = true
       }
       const lastToken = tokens.at(-1)
-      if (lastToken && lastToken.type === 'text') {
+      if (lastToken && lastToken.type === "text") {
         lastToken.content += rawToken
       } else {
-        tokens.push({ type: 'text', content: rawToken })
+        tokens.push({ type: "text", content: rawToken })
       }
       continue
     }
@@ -322,8 +319,8 @@ export function tokenizePassage(sanitizedText: string, title?: string): { tokens
         const target = rawToken.slice(prefixLen)
 
         const blankToken: BlankToken = {
-          type: 'blank',
-          id: `blank-${blanks.length}`,
+          type: "blank",
+          id: "blank-" + blanks.length,
           blankIndex: blanks.length,
           prefix,
           target,
@@ -344,11 +341,11 @@ export function tokenizePassage(sanitizedText: string, title?: string): { tokens
     isStartOfSentence = false
 
     const lastToken = tokens.at(-1)
-    if (lastToken && lastToken.type === 'text') {
+    if (lastToken && lastToken.type === "text") {
       lastToken.content += rawToken
     } else {
       tokens.push({
-        type: 'text',
+        type: "text",
         content: rawToken,
       })
     }
@@ -358,42 +355,19 @@ export function tokenizePassage(sanitizedText: string, title?: string): { tokens
 }
 
 /**
- * Returns a randomized, pre-certified C-Test passage from the in-memory fallback bank.
- */
-export function getFallbackCTestPassage(): CTestPassage {
-  const randomIndex = Math.floor(Math.random() * FALLBACK_PASSAGES.length)
-  const item = FALLBACK_PASSAGES.at(randomIndex) || FALLBACK_PASSAGES[0]
-  const sanitized = sanitizeText(item.extract)
-  const validation = validatePassage(sanitized, item.title)
-  const { tokens, blanks } = tokenizePassage(sanitized, item.title)
-
-  return {
-    title: item.title,
-    pageUrl: item.pageUrl,
-    rawExtract: item.extract,
-    sanitizedText: sanitized,
-    sentenceCount: validation.sentenceCount,
-    totalWordCount: validation.totalWords,
-    tokens,
-    blanks,
-    isFallback: true,
-  }
-}
-
-/**
  * Fetches a single random summary from Simple English Wikipedia API.
  */
 export async function fetchWikipediaPassage(signal?: AbortSignal): Promise<WikipediaSummaryResponse> {
-  const endpoint = 'https://simple.wikipedia.org/api/rest_v1/page/random/summary'
+  const endpoint = "https://simple.wikipedia.org/api/rest_v1/page/random/summary"
   const response = await fetch(endpoint, {
     headers: {
-      'Accept': 'application/json',
+      "Accept": "application/json",
     },
     signal,
   })
 
   if (!response.ok) {
-    throw new Error(`Wikipedia API request failed with status: ${response.status} ${response.statusText}`)
+    throw new Error("Wikipedia API request failed with status: " + response.status + " " + response.statusText)
   }
 
   const data: WikipediaSummaryResponse = await response.json()
@@ -415,23 +389,21 @@ export interface FetchOptions {
   maxBatches?: number
   batchSize?: number
   signal?: AbortSignal
-  onRetry?: (attempt: number, reason: string) => void
-  allowFallback?: boolean
+  onRetry?: (attempt: number, reason: string, totalEvaluated: number) => void
 }
 
 /**
- * Fetches and parses a valid C-Test passage using Parallel Batch Ingestion.
- * If Wikipedia is slow or yields no valid candidate after maxBatches,
- * seamlessly falls back to the in-memory certified passage bank.
+ * Fetches and parses a valid C-Test passage using continuous Parallel Batch Ingestion.
+ * Keeps searching Wikipedia until a valid article meeting all 10 blanks and constraints is found.
  */
 export async function fetchAndParseCTest(options: FetchOptions = {}): Promise<CTestPassage> {
-  const { maxBatches = 3, batchSize = 3, signal, onRetry, allowFallback = true } = options
-  let lastErrorReason = 'No valid passage found in batch.'
+  const { maxBatches = Infinity, batchSize = 3, signal, onRetry } = options
+  let lastErrorReason = "No valid passage found in batch."
   let totalCandidatesEvaluated = 0
 
   for (let batch = 1; batch <= maxBatches; batch++) {
     if (signal?.aborted) {
-      throw new DOMException('Passage fetch aborted', 'AbortError')
+      throw new DOMException("Passage fetch aborted", "AbortError")
     }
 
     try {
@@ -439,7 +411,7 @@ export async function fetchAndParseCTest(options: FetchOptions = {}): Promise<CT
       totalCandidatesEvaluated += summaries.length
 
       for (const summary of summaries) {
-        const sanitized = sanitizeText(summary.extract || '')
+        const sanitized = sanitizeText(summary.extract || "")
         const validation = validatePassage(sanitized, summary.title)
 
         if (validation.valid) {
@@ -455,28 +427,25 @@ export async function fetchAndParseCTest(options: FetchOptions = {}): Promise<CT
               totalWordCount: validation.totalWords,
               tokens,
               blanks,
-              isFallback: false,
             }
           }
         } else {
-          lastErrorReason = validation.reason || 'Failed validation constraints'
+          lastErrorReason = validation.reason || "Failed validation constraints"
         }
       }
 
-      onRetry?.(batch, `Batch ${batch}/${maxBatches} evaluated (${totalCandidatesEvaluated} candidates): ${lastErrorReason}`)
+      onRetry?.(batch, lastErrorReason, totalCandidatesEvaluated)
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
+      if (err instanceof DOMException && err.name === "AbortError") {
         throw err
       }
       lastErrorReason = err instanceof Error ? err.message : String(err)
-      onRetry?.(batch, lastErrorReason)
+      onRetry?.(batch, lastErrorReason, totalCandidatesEvaluated)
+
+      // Short delay before retrying on network error
+      await new Promise(res => setTimeout(res, 300))
     }
   }
 
-  // Gracefully return from in-memory certified bank if Wikipedia is exhausted or unreachable
-  if (allowFallback) {
-    return getFallbackCTestPassage()
-  }
-
-  throw new Error(`Could not find a valid C-Test passage after ${maxBatches} batches. Last reason: ${lastErrorReason}`)
+  throw new Error("Could not find a valid C-Test passage after " + maxBatches + " batches. Last reason: " + lastErrorReason)
 }

@@ -107,32 +107,31 @@
   }
 
   // In-memory pre-fetching queue for 0ms instant passage transitions
+  const BUFFER_TARGET_SIZE = 3
   let passageBuffer: CTestPassage[] = []
   let isPrefetching = false
 
   async function prefetchNextPassages() {
-    if (isPrefetching || passageBuffer.length >= 2) return
+    if (isPrefetching || passageBuffer.length >= BUFFER_TARGET_SIZE) return
     isPrefetching = true
     try {
       const next = await fetchAndParseCTest({
-        maxBatches: 2,
+        maxBatches: 5,
         batchSize: 3,
-        allowFallback: true,
       })
-      if (next && !passageBuffer.some(p => p.title === next.title)) {
+      if (next && !passageBuffer.some(p => p.title === next.title) && passage?.title !== next.title) {
         passageBuffer.push(next)
       }
     } catch {
       // Background prefetch errors are safely ignored
     } finally {
       isPrefetching = false
-      if (passageBuffer.length < 2) {
-        setTimeout(prefetchNextPassages, 1500)
+      if (passageBuffer.length < BUFFER_TARGET_SIZE) {
+        setTimeout(prefetchNextPassages, 1000)
       }
     }
   }
 
-  // Load new passage (instant from buffer or fast parallel batch fetch)
   async function loadPassage() {
     stopTimer()
     errorMessage = null
@@ -157,17 +156,16 @@
       return
     }
 
-    // 2. Parallel batch fetch if buffer is currently empty
+    // 2. Real-time continuous fetch from Wikipedia if buffer is empty
     loading = true
     try {
       const result = await fetchAndParseCTest({
-        maxBatches: 3,
+        maxBatches: Infinity,
         batchSize: 3,
-        onRetry: (batch, reason) => {
+        onRetry: (batch, _reason, totalEvaluated) => {
           retryAttempt = batch
-          retryMessage = reason
+          retryMessage = `Searching Simple English Wikipedia (Batch ${batch}, ${totalEvaluated} articles evaluated)...`
         },
-        allowFallback: true,
       })
       passage = result
       loading = false
@@ -184,7 +182,6 @@
     }
   }
 
-  // Handle Input Auto-Advance for mobile keyboards (Strict English Only)
   function handleInput(index: number, e: Event) {
     if (!passage || isGraded) return
     const input = e.target as HTMLInputElement
@@ -555,12 +552,8 @@
       <!-- Passage Article Metadata -->
       <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
         <div class="flex items-center gap-2">
-          <span class="px-2.5 py-1 text-xs font-semibold rounded-md {
-            passage.isFallback
-              ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200/50 dark:border-emerald-800/40'
-              : 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200/50 dark:border-indigo-800/40'
-          }">
-            {passage.isFallback ? 'Certified Academic Bank' : 'Wikipedia Topic'}
+          <span class="px-2.5 py-1 text-xs font-semibold rounded-md bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200/50 dark:border-indigo-800/40">
+            Wikipedia Live Topic
           </span>
           <h2 class="text-lg font-bold text-slate-900 dark:text-white">
             {passage.title}
