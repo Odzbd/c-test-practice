@@ -1,11 +1,14 @@
-# English "Complete the Words" (C-Test) Practice App
+# English Test Practice Suite (C-Test & Build a Sentence)
 
-A minimalist, high-performance, single-page web app for mastering the **English "Complete the Words" (C-Test)** task (found in TOEFL iBT, Duolingo English Test, and academic language assessments).
+A minimalist, high-performance, single-page web app for mastering academic English assessments (found in **TOEFL iBT / TOEFL Essentials**, Duolingo English Test, and university entrance exams):
+1. **Reading / Lexical Mastery:** English "Complete the Words" (C-Test) Task
+2. **Writing / Syntax Mastery:** TOEFL-Style "Build a Sentence" Task (10 Questions • 7 Minutes)
 
 - **100% Serverless & Zero-Tracking:** Runs entirely in browser memory (RAM) with no backend or account required.
 - **Infinite Dynamic Ingestion:** Streams real-world academic articles directly from Simple English Wikipedia (250,000+ articles) with background pre-fetching for instant (0ms) passage transitions.
 - **Zero-Repeat Session Guarantee:** Level 1 in-memory tracking ensures you never encounter the same article twice in a single session.
 - **Strict Psychometric Truncation Engine:** Sentence 1 kept 100% intact as a context anchor; alternating word truncation starts in Sentence 2; exact $\lceil L/2 \rceil$ prefix / $\lfloor L/2 \rfloor$ target; capped at exactly 10 unique blanks.
+- **Timed Writing Simulation (Build a Sentence):** 10 consecutive discourse-paired questions from authentic academic text within a strict 7-minute (07:00) countdown, with interactive phrase chunks and binary scoring.
 - **Smart Mobile & Desktop UX:** Virtual keyboard retention (no flicker on iOS Safari/Android Chrome), `enterkeyhint` smart navigation, underline dash slots, and instant side-by-side grading.
 - **Interactive Dictionary & Phonetics Inspector:** Click any word in the passage to inspect contextual definitions, IPA pronunciation guides, synonyms, and CEFR language proficiency levels.
 
@@ -38,23 +41,23 @@ The optimized static bundle is emitted to the `dist/` directory.
 
 ## 🛠️ Core Architecture & Modules
 
-### 1. Ingestion & Psychometric Engine (`src/lib/cTestParser.ts`)
+### 1. C-Test Ingestion & Psychometric Engine (`src/lib/cTestParser.ts`)
 Zero-dependency TypeScript engine implementing official C-Test psychometric construction rules:
 - **Dynamic Wikipedia Feed:** Queries `https://simple.wikipedia.org/api/rest_v1/page/random/summary` across concurrent workers for ultra-fast resolution (<300ms).
 - **Zero-Repeat Session Filter:** Memory-based `sessionSeenTitles = new Set<string>()` automatically rejects previously completed articles in 0ms.
 - **Text Sanitization (`sanitizeText`):** Strips bracketed citations (`[1]`, `[note a]`), IPA guide strings (`(/.../)`), and normalizes spacing.
-- **Strict Validation Gate (`validatePassage`):**
-  - Minimum 3 distinct sentences.
-  - Word count bounded between 60 and 130 words.
-  - Minimum 20 eligible alphabetic words available after Sentence 1.
-- **Psychometric Tokenizer (`tokenizePassage`):**
-  - Sentence 1 is preserved 100% intact as the context anchor.
-  - Truncates every 2nd eligible word starting from Sentence 2.
-  - Truncation formula: Prefix = `Math.ceil(L / 2)`, Blank Target = `Math.floor(L / 2)`.
-  - Anti-cheat & quality filters: excludes Proper Nouns, article title words, duplicate blanks, and look-back words.
-  - Capped at **exactly 10 blanks**.
+- **Strict Validation Gate (`validatePassage`):** Minimum 3 distinct sentences, 60–130 words, and at least 20 eligible alphabetic words after Sentence 1.
+- **Psychometric Tokenizer (`tokenizePassage`):** Sentence 1 intact; truncates every 2nd eligible word starting from Sentence 2 ($\lceil L/2 \rceil$ prefix, $\lfloor L/2 \rfloor$ blank); capped at **exactly 10 blanks**.
 
-### 2. Lexical & Phonetics Engine (`src/lib/dictionaryService.ts`)
+### 2. Sentence Builder Engine (`src/lib/sentenceBuilder.ts`)
+Discourse-paired syntax construction engine for TOEFL-style sentence building:
+- **Discourse Pair Extraction:** Extracts consecutive sentence pairs `(Sentence 1 = Context, Sentence 2 = Target)` from Simple English Wikipedia.
+- **Syntactic Chunking (`chunkSentence`):** Groups target sentences into 4–7 coherent phrase/word chunks based on grammatical boundaries (prepositions, conjunctions, verb phrases).
+- **Guaranteed Shuffling (`shuffleChunks`):** Fisher-Yates shuffle guaranteeing the initial chunk presentation differs from the target order.
+- **Binary Machine Scoring:** Evaluates user-arranged chunks against target syntax (1 point for complete accuracy, 0 otherwise).
+- **Offline Academic Fallback Bank:** Preloaded with curated academic sentence pairs for instant 0ms offline capability.
+
+### 3. Lexical & Phonetics Engine (`src/lib/dictionaryService.ts`)
 CORS-safe linguistic engine providing offline and real-time dictionary capabilities:
 - **CMU ARPAbet-to-IPA Decoding (`arpaToIPA`):** Full phonetic conversion engine mapping ARPAbet phoneme sequences (`IH1 Z` → `/ɪz/`, `D ER0 EH1 K T S` → `/dərˈɛkts/`) with primary (`ˈ`) and secondary (`ˌ`) stress marks.
 - **Built-in Curated Lexicon:** High-speed in-memory dictionary for high-frequency function and academic words.
@@ -62,17 +65,15 @@ CORS-safe linguistic engine providing offline and real-time dictionary capabilit
 - **Datamuse Academic Integration:** Asynchronously queries part-of-speech, definitions, and academic synonyms with in-memory caching.
 - **Prototype-Safe Design:** Uses `Map` data structures and `.at()` indexing to eliminate prototype pollution vectors.
 
-### 3. Reactive UI Component (`src/lib/CTestApp.svelte`)
-Modern Svelte 5 single-page application with responsive dark/light modes:
-- **Smart Enter Flow:**
-  - Blanks 1–9 (`enterkeyhint="next"`): Pressing Enter automatically advances cursor focus to the next blank.
-  - Blank 10 (`enterkeyhint="done"`): Pressing Enter submits and grades the test.
-  - Backspace on an empty blank automatically returns focus to the preceding input.
-- **Mobile Keyboard Retention:** Focus hopping maintains active virtual keyboard focus without closing or flickering on mobile viewports.
-- **Underline Dash Slots:** Renders individual character slots with live pulsing cursor indicators.
-- **Exam vs. Practice Modes:** Switch between untimed practice and 2:30 countdown timed simulation.
-- **Diagnostic Performance Analytics:** Categorizes mistakes (Flawless, Spelling Near-Miss, Incomplete, Lexical Mismatch) using Levenshtein distance calculations.
-- **Interactive Word Inspector:** Modal overlay displaying word definitions, phonetic pronunciations, CEFR tags, and synonyms for any clicked word or correction badge.
+### 4. Reactive UI Components (`src/lib/CTestApp.svelte` & `src/lib/BuildSentenceApp.svelte`)
+Modern Svelte 5 reactive single-page application with responsive dark/light modes:
+- **Global Top Navigation (`src/App.svelte`):** Seamless switcher between `[ 🧩 Complete the Words (C-Test) ]` and `[ ✍️ Build a Sentence (Writing) ]`.
+- **C-Test Practice:** Smart Enter flow (`enterkeyhint="next"`/`"done"`), mobile keyboard retention, underline dash slots, and diagnostic error categorizations.
+- **Build a Sentence Writing:**
+  - **Timed Exam Simulation:** 10 questions with a global 7-minute (420s) countdown timer starting upon user confirmation.
+  - **Interactive Chip Tray:** Tap to place and remove phrase chunks, reset, undo, and native speech synthesis playback.
+  - **Comprehensive Result Screen:** Total score, elapsed time, confetti on high scores, and item-by-item diagnostic review.
+  - **Free Practice Mode:** Untimed sentence-by-sentence training with instant feedback and reference answers.
 
 ---
 
@@ -103,17 +104,19 @@ Because the app is 100% static, client-side, and serverless, it can be deployed 
 
 ## 🧪 Testing
 
-The automated test suite runs via Vitest with 100% coverage across parser, tokenizer, dictionary, phonetics, and security components:
+The automated test suite runs via Vitest with 100% coverage across parser, tokenizer, dictionary, sentence builder, and security components:
 
 ```bash
 npm test
 ```
 
-Test coverage includes:
+Test coverage (36 tests) includes:
 - Reference sanitization (`[1]`, notes, IPA tags).
 - Sentence splitting with abbreviation handling (`Dr.`, `Mr.`, `U.S.`).
 - ETS truncation formula and proper noun preservation.
 - Level 1 Zero-Repeat Session filter.
 - Dynamic concurrent ingestion and abort signal handling.
+- Sentence pair validation and chunking rules.
+- Fisher-Yates chunk shuffling and binary scoring evaluation.
 - CMU ARPAbet to IPA phonetic conversions and stress assignment.
 - Prototype pollution safety and graceful network fallback.
