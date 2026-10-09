@@ -146,8 +146,7 @@
     const userTexts = placedChunks.map(c => c.text)
     const evalResult = evaluateSentenceAnswer(
       userTexts,
-      currentQuestion.correctOrder,
-      currentQuestion.targetSentence
+      currentQuestion.correctOrder
     )
 
     if (mode === 'exam') {
@@ -506,13 +505,19 @@
       <!-- Target Construct Tray (Where selected chunks are assembled) -->
       <div class="p-5 sm:p-6 rounded-2xl bg-slate-100/70 dark:bg-slate-900/60 border-2 border-dashed border-slate-300 dark:border-slate-700 min-h-[140px] flex flex-col justify-between transition-colors">
         <div>
-          <span class="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider block mb-3">
-            Constructed Sentence (Tap chunk to remove):
-          </span>
+          <div class="flex items-center justify-between gap-2 mb-3">
+            <span class="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider block">
+              Constructed Sentence (Tap chunk to remove):
+            </span>
+            <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-2xs">
+              <span class="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Sentence ends with:</span>
+              <span class="font-mono font-black text-sm text-violet-600 dark:text-violet-400">{currentQuestion.endingPunctuation}</span>
+            </div>
+          </div>
 
           <div class="flex flex-wrap items-center gap-2 min-h-[44px]">
             {#if placedChunks.length === 0}
-              <span class="text-xs sm:text-sm text-slate-400 dark:text-slate-500 italic select-none">
+              <span class="text-xs sm:text-sm text-slate-400 dark:text-slate-500 italic select-none py-2">
                 Tap or click word chunks below to assemble the sentence in correct grammatical order...
               </span>
             {:else}
@@ -528,6 +533,14 @@
                   <span class="text-xs opacity-60 group-hover:opacity-100 ml-0.5">✕</span>
                 </button>
               {/each}
+
+              <!-- Fixed Ending Punctuation Slot on the far right -->
+              <span
+                class="inline-flex items-center justify-center min-w-[34px] h-[40px] px-3 rounded-xl bg-slate-200/90 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-mono font-black text-lg border border-slate-300 dark:border-slate-700 select-none shadow-2xs"
+                title={`Fixed ending punctuation: ${currentQuestion.endingPunctuation}`}
+              >
+                {currentQuestion.endingPunctuation}
+              </span>
             {/if}
           </div>
         </div>

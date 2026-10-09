@@ -3,12 +3,46 @@ import {
   validateSentencePair,
   chunkSentence,
   shuffleChunks,
+  formatChunkCase,
   createSentenceQuestion,
   extractSentencePairsFromText,
   evaluateSentenceAnswer,
   fetchBuildSentenceBatch,
   FALLBACK_SENTENCE_QUESTIONS,
 } from './sentenceBuilder'
+
+describe('sentenceBuilder - Chunk Casing & Punctuation Rules', () => {
+  it('formats all words to lowercase except pronoun "I" and contractions', () => {
+    expect(formatChunkCase('They contain')).toBe('they contain')
+    expect(formatChunkCase('The Solar System')).toBe('the solar system')
+    expect(formatChunkCase('I think')).toBe('I think')
+    expect(formatChunkCase('Because I was')).toBe('because I was')
+    expect(formatChunkCase("I'm going")).toBe("I'm going")
+    expect(formatChunkCase("I've seen")).toBe("I've seen")
+  })
+
+  it('chunks a 10-word sentence into exactly 5 chunks without punctuation', () => {
+    const sentence = 'They contain a high percentage of all known plant species.'
+    const chunks = chunkSentence(sentence, 5)
+    expect(chunks).toHaveLength(5)
+
+    // No chunk should end with punctuation or contain period
+    for (const chunk of chunks) {
+      expect(chunk).not.toMatch(/[.!?]$/)
+      expect(chunk).not.toMatch(/[,;:]$/)
+    }
+
+    // Joined words reconstitute the words without punctuation
+    expect(chunks.join(' ')).toBe('they contain a high percentage of all known plant species')
+  })
+
+  it('keeps "I" capitalized inside chunks', () => {
+    const sentence = 'I believe that we can solve this complex scientific puzzle.'
+    const chunks = chunkSentence(sentence, 5)
+    expect(chunks).toHaveLength(5)
+    expect(chunks[0]).toContain('I')
+  })
+})
 
 describe('sentenceBuilder - Sentence Pair Validation', () => {
   it('validates good academic sentence pairs within length constraints', () => {
@@ -43,59 +77,55 @@ describe('sentenceBuilder - Sentence Pair Validation', () => {
   })
 })
 
-describe('sentenceBuilder - Sentence Chunking & Shuffling', () => {
-  it('chunks a 10-word sentence into 4–6 coherent chunks', () => {
-    const sentence = 'They contain a high percentage of all known plant species.'
-    const chunks = chunkSentence(sentence)
-    expect(chunks.length).toBeGreaterThanOrEqual(3)
-    expect(chunks.length).toBeLessThanOrEqual(7)
-    // Joined chunks must reconstitute the original sentence exactly
-    expect(chunks.join(' ')).toBe(sentence)
-  })
-
+describe('sentenceBuilder - Shuffling & Question Creation', () => {
   it('shuffles chunks so the order differs from original', () => {
-    const chunks = ['They contain', 'a high percentage of', 'all known plant', 'species.']
+    const chunks = ['they contain', 'a high percentage', 'of all known', 'plant and', 'animal species']
     const shuffled = shuffleChunks(chunks)
     expect(shuffled).toHaveLength(chunks.length)
-    // Check elements match
     expect([...shuffled].sort()).toEqual([...chunks].sort())
   })
 
-  it('creates SentenceQuestion object with correctly structured chunks', () => {
+  it('creates SentenceQuestion object with endingPunctuation extracted', () => {
     const context = 'The oceanic abyss receives virtually no sunlight even at noon.'
-    const target = 'Creatures in this zone depend on organic material.'
+    const target = 'Creatures in this zone depend on organic material from above.'
     const q = createSentenceQuestion(context, target, 'Deep Ocean')
 
     expect(q.title).toBe('Deep Ocean')
     expect(q.context).toBe(context)
     expect(q.targetSentence).toBe(target)
-    expect(q.chunks.length).toBeGreaterThanOrEqual(2)
-    expect(q.correctOrder.join(' ')).toBe(target)
+    expect(q.endingPunctuation).toBe('.')
+    expect(q.chunks).toHaveLength(5)
+  })
+
+  it('extracts question mark when target is a question', () => {
+    const context = 'Many students wonder about the history of the solar system.'
+    const target = 'How did all the major planets form in space?'
+    const q = createSentenceQuestion(context, target, 'Solar System')
+
+    expect(q.endingPunctuation).toBe('?')
   })
 })
 
 describe('sentenceBuilder - Evaluation & Scoring', () => {
   it('correctly scores an exact match as true', () => {
-    const targetSentence = 'They provide clean power without producing greenhouse gas emissions.'
-    const userChunks = ['They provide', 'clean power', 'without producing', 'greenhouse gas emissions.']
-    const correctOrder = ['They provide', 'clean power', 'without producing', 'greenhouse gas emissions.']
+    const userChunks = ['they provide', 'power without', 'producing greenhouse', 'gas', 'emissions']
+    const correctOrder = ['they provide', 'power without', 'producing greenhouse', 'gas', 'emissions']
 
-    const evalResult = evaluateSentenceAnswer(userChunks, correctOrder, targetSentence)
+    const evalResult = evaluateSentenceAnswer(userChunks, correctOrder)
     expect(evalResult.isCorrect).toBe(true)
   })
 
   it('scores an out-of-order sequence as false (binary scoring)', () => {
-    const targetSentence = 'They provide clean power without producing greenhouse gas emissions.'
-    const userChunks = ['clean power', 'They provide', 'without producing', 'greenhouse gas emissions.']
-    const correctOrder = ['They provide', 'clean power', 'without producing', 'greenhouse gas emissions.']
+    const userChunks = ['power without', 'they provide', 'producing greenhouse', 'gas', 'emissions']
+    const correctOrder = ['they provide', 'power without', 'producing greenhouse', 'gas', 'emissions']
 
-    const evalResult = evaluateSentenceAnswer(userChunks, correctOrder, targetSentence)
+    const evalResult = evaluateSentenceAnswer(userChunks, correctOrder)
     expect(evalResult.isCorrect).toBe(false)
   })
 })
 
 describe('sentenceBuilder - Wikipedia Text Parsing & Fallback Batch', () => {
-  it('extracts sentence pairs from Wikipedia extract text', () => {
+  it('extracts sentence pairs from Wikipedia extract text with ~5 chunks each', () => {
     const rawText =
       'The Solar System formed around 4.6 billion years ago from a molecular cloud. ' +
       'Most of the remaining mass collapsed into planets and other orbiting bodies. ' +
@@ -105,7 +135,8 @@ describe('sentenceBuilder - Wikipedia Text Parsing & Fallback Batch', () => {
     const pairs = extractSentencePairsFromText(rawText, 'Solar System')
     expect(pairs.length).toBeGreaterThanOrEqual(1)
     expect(pairs[0].context).toContain('Solar System formed')
-    expect(pairs[0].targetSentence).toContain('remaining mass collapsed')
+    expect(pairs[0].endingPunctuation).toBe('.')
+    expect(pairs[0].chunks).toHaveLength(5)
   })
 
   it('provides full 10-question batch using fallback bank when fetch fails', async () => {
@@ -115,6 +146,7 @@ describe('sentenceBuilder - Wikipedia Text Parsing & Fallback Batch', () => {
     const batch = await fetchBuildSentenceBatch(10)
     expect(batch).toHaveLength(10)
     expect(FALLBACK_SENTENCE_QUESTIONS.map(f => f.title)).toContain(batch[0].title)
+    expect(batch[0].endingPunctuation).toBe('.')
 
     globalThis.fetch = originalFetch
   })

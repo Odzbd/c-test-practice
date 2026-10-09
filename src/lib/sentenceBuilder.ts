@@ -1,14 +1,15 @@
 /**
  * Sentence Builder Engine (TOEFL-Style Writing: Build a Sentence)
  *
- * Sourced dynamically from Simple English Wikipedia discourse pairs:
- * - Sentence 1: Context / Prompt sentence (establishes discourse setting)
- * - Sentence 2: Target Sentence (broken into 4–7 grammatical chunks)
- * - Chunks are shuffled to form a syntax puzzle
- * - Machine-scored binary: 1 point for exact syntactic match, 0 otherwise
+ * Rules:
+ * - Word & Phrase Bank: All lowercase except "I" (and contractions like "I'm", "I'll", "I've", "I'd").
+ * - Chunks contain NO terminating punctuation (no '.', '?', '!').
+ * - Fixed ending punctuation ('.' or '?') is displayed statically at the top-right of the sentence slot.
+ * - Targets approximately 5 chunks (~4–6 chunks) per sentence.
+ * - Machine-scored binary: 1 point for exact syntactic match, 0 otherwise.
  */
 
-import { sanitizeText, splitSentences, ABBREVIATIONS } from './cTestParser'
+import { sanitizeText, splitSentences } from './cTestParser'
 
 export interface SentenceChunk {
   id: string
@@ -20,6 +21,7 @@ export interface SentenceQuestion {
   title: string
   context: string
   targetSentence: string
+  endingPunctuation: string
   chunks: SentenceChunk[]
   correctOrder: string[]
   wikiUrl?: string
@@ -30,13 +32,21 @@ export interface SentencePairValidation {
   reason?: string
 }
 
-const PREPOSITIONS_AND_CONJUNCTIONS = new Set([
-  'in', 'on', 'at', 'by', 'for', 'with', 'about', 'against', 'between',
-  'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to',
-  'from', 'up', 'down', 'over', 'under', 'again', 'further', 'then', 'once',
-  'and', 'but', 'or', 'nor', 'so', 'yet', 'because', 'although', 'while',
-  'since', 'unless', 'until', 'where', 'when', 'which', 'that', 'who', 'whom',
-])
+/**
+ * Lowercases all words in a chunk except standalone "I" and contractions like "I'm", "I'll", "I've", "I'd".
+ */
+export function formatChunkCase(text: string): string {
+  return text
+    .split(/\s+/)
+    .map(w => {
+      // Keep "I" or "I'm", "I'll", "I've", "I'd"
+      if (/^I(['’][a-z]+)?$/i.test(w)) {
+        return 'I' + w.slice(1).toLowerCase()
+      }
+      return w.toLowerCase()
+    })
+    .join(' ')
+}
 
 /**
  * Validates whether two consecutive sentences are well-suited for a Build-a-Sentence question.
@@ -73,42 +83,37 @@ export function validateSentencePair(context: string, target: string): SentenceP
 }
 
 /**
- * Intelligently chunks a target sentence into 4–7 coherent phrase/word chunks.
+ * Intelligently chunks a target sentence into approximately 5 chunks (4–6 chunks).
+ * Strips all internal and trailing punctuation so no chunk reveals its position or ends with a period.
+ * Formats all words to lowercase except "I".
  */
-export function chunkSentence(sentence: string): string[] {
-  const words = sentence.trim().split(/\s+/).filter(Boolean)
-  if (words.length === 0) return []
-  if (words.length <= 4) return words
+export function chunkSentence(sentence: string, targetChunks = 5): string[] {
+  // Strip ending punctuation
+  const clean = sentence.replace(/[.!?]+$/, '').trim()
+  const rawWords = clean.split(/\s+/).filter(Boolean)
+  if (rawWords.length === 0) return []
 
-  const chunks: string[] = []
-  let currentChunk: string[] = []
+  // Clean punctuation from each word (except apostrophes in contractions like don't, I'm)
+  const words = rawWords.map(w => w.replace(/^[("']|[)"'.,;:!?]+$/g, '').trim()).filter(Boolean)
 
-  for (let i = 0; i < words.length; i++) {
-    const word = words[i]
-    const cleanLower = word.toLowerCase().replace(/^[("']|[)"'.,!?]+$/g, '')
-
-    // Check natural boundary points (prepositions, conjunctions, punctuation)
-    const isBoundary =
-      currentChunk.length >= 2 &&
-      (PREPOSITIONS_AND_CONJUNCTIONS.has(cleanLower) || /[,;:]$/.test(words[i - 1]))
-
-    // If chunk is getting long (3 words) or we hit a natural boundary, push it
-    if ((isBoundary || currentChunk.length >= 3) && i < words.length - 1) {
-      chunks.push(currentChunk.join(' '))
-      currentChunk = [word]
-    } else {
-      currentChunk.push(word)
-    }
+  if (words.length <= targetChunks) {
+    return words.map(w => formatChunkCase(w))
   }
 
-  if (currentChunk.length > 0) {
-    // If last chunk is just 1 word and previous chunk exists, consider merging if previous isn't too long
-    if (currentChunk.length === 1 && chunks.length > 0 && chunks[chunks.length - 1].split(' ').length <= 2) {
-      const prev = chunks.pop()!
-      chunks.push(`${prev} ${currentChunk[0]}`)
-    } else {
-      chunks.push(currentChunk.join(' '))
-    }
+  // Determine number of chunks (between 4 and 6, targeting 5)
+  const count = Math.max(4, Math.min(6, targetChunks))
+  const baseSize = Math.floor(words.length / count)
+  const remainder = words.length % count
+
+  const chunks: string[] = []
+  let wordIdx = 0
+
+  for (let i = 0; i < count; i++) {
+    const chunkSize = baseSize + (i < remainder ? 1 : 0)
+    const slice = words.slice(wordIdx, wordIdx + chunkSize)
+    wordIdx += chunkSize
+    const chunkText = formatChunkCase(slice.join(' '))
+    chunks.push(chunkText)
   }
 
   return chunks
@@ -160,7 +165,10 @@ export function createSentenceQuestion(
   wikiUrl?: string,
   id = Math.random().toString(36).slice(2, 9)
 ): SentenceQuestion {
-  const originalChunks = chunkSentence(target)
+  const endingMatch = target.trim().match(/[.!?]+$/)
+  const endingPunctuation = endingMatch ? endingMatch[0] : '.'
+
+  const originalChunks = chunkSentence(target, 5)
   const shuffledTexts = shuffleChunks(originalChunks)
 
   const chunks: SentenceChunk[] = shuffledTexts.map((text, idx) => ({
@@ -173,6 +181,7 @@ export function createSentenceQuestion(
     title,
     context: context.trim(),
     targetSentence: target.trim(),
+    endingPunctuation,
     chunks,
     correctOrder: originalChunks,
     wikiUrl,
@@ -213,14 +222,10 @@ export function extractSentencePairsFromText(
  */
 export function evaluateSentenceAnswer(
   userChunks: string[],
-  correctOrder: string[],
-  targetSentence: string
+  correctOrder: string[]
 ): { isCorrect: boolean; normalizedUser: string; normalizedTarget: string } {
-  const userText = userChunks.join(' ').trim()
-  const targetText = targetSentence.trim()
-
-  const normalizedUser = userText.replace(/\s+/g, ' ').toLowerCase()
-  const normalizedTarget = targetText.replace(/\s+/g, ' ').toLowerCase()
+  const normalizedUser = userChunks.join(' ').trim().toLowerCase()
+  const normalizedTarget = correctOrder.join(' ').trim().toLowerCase()
 
   const isCorrect = normalizedUser === normalizedTarget
   return {
@@ -230,91 +235,103 @@ export function evaluateSentenceAnswer(
   }
 }
 
-// Fallback high-quality academic question bank for instant offline access or network issues
+// Fallback high-quality academic question bank (~5 chunks each, lowercase except 'I', no punctuation on chunks)
 export const FALLBACK_SENTENCE_QUESTIONS: Omit<SentenceQuestion, 'chunks'>[] = [
   {
     id: 'fb-1',
     title: 'Photosynthesis',
     context: 'Plants absorb sunlight through chlorophyll pigments inside their green leaves.',
     targetSentence: 'This light energy is used to convert water and carbon dioxide into sugars.',
-    correctOrder: ['This light energy', 'is used to convert', 'water and carbon dioxide', 'into sugars.'],
+    endingPunctuation: '.',
+    correctOrder: ['this light energy', 'is used to', 'convert water and', 'carbon dioxide', 'into sugars'],
   },
   {
     id: 'fb-2',
     title: 'Solar System',
     context: 'The Solar System formed approximately 4.6 billion years ago from a giant molecular cloud.',
     targetSentence: 'Most of the remaining mass collapsed into planets and other orbiting bodies.',
-    correctOrder: ['Most of', 'the remaining mass', 'collapsed into planets', 'and other orbiting bodies.'],
+    endingPunctuation: '.',
+    correctOrder: ['most of the', 'remaining mass', 'collapsed into', 'planets and other', 'orbiting bodies'],
   },
   {
     id: 'fb-3',
     title: 'Atmosphere',
     context: 'Earth has a thick layer of gases held in place by gravitational force.',
     targetSentence: 'It protects living organisms by absorbing ultraviolet solar radiation.',
-    correctOrder: ['It protects', 'living organisms', 'by absorbing', 'ultraviolet solar radiation.'],
+    endingPunctuation: '.',
+    correctOrder: ['it protects', 'living organisms', 'by absorbing', 'ultraviolet', 'solar radiation'],
   },
   {
     id: 'fb-4',
     title: 'Ecosystems',
     context: 'Tropical rainforests receive high amounts of rainfall throughout the entire year.',
     targetSentence: 'They contain a high percentage of all known plant and animal species.',
-    correctOrder: ['They contain', 'a high percentage of', 'all known plant', 'and animal species.'],
+    endingPunctuation: '.',
+    correctOrder: ['they contain a', 'high percentage', 'of all known', 'plant and', 'animal species'],
   },
   {
     id: 'fb-5',
     title: 'Gravity',
     context: 'Gravity is a fundamental interaction that causes mutual attraction between all things with mass.',
     targetSentence: 'It gives weight to physical objects on Earth and guides ocean tides.',
-    correctOrder: ['It gives weight', 'to physical objects', 'on Earth and', 'guides ocean tides.'],
+    endingPunctuation: '.',
+    correctOrder: ['it gives weight', 'to physical objects', 'on earth and', 'guides ocean', 'tides'],
   },
   {
     id: 'fb-6',
     title: 'Deep Ocean',
     context: 'The oceanic abyss receives virtually no sunlight even during the brightest daytime.',
     targetSentence: 'Creatures in this zone depend on organic material falling from the surface.',
-    correctOrder: ['Creatures in this zone', 'depend on organic material', 'falling from', 'the surface.'],
+    endingPunctuation: '.',
+    correctOrder: ['creatures in', 'this zone depend', 'on organic material', 'falling from', 'the surface'],
   },
   {
     id: 'fb-7',
     title: 'Electricity',
     context: 'Electric charge is the physical property of matter that causes it to experience force.',
     targetSentence: 'Moving electrical charges generate magnetic fields around conductive wires.',
-    correctOrder: ['Moving electrical charges', 'generate magnetic fields', 'around conductive wires.'],
+    endingPunctuation: '.',
+    correctOrder: ['moving electrical', 'charges generate', 'magnetic fields', 'around', 'conductive wires'],
   },
   {
     id: 'fb-8',
     title: 'Plate Tectonics',
     context: 'The outer shell of Earth is divided into several rigid moving tectonic plates.',
     targetSentence: 'Their collisions generate intense earthquakes along volcanic mountain ranges.',
-    correctOrder: ['Their collisions generate', 'intense earthquakes along', 'volcanic mountain ranges.'],
+    endingPunctuation: '.',
+    correctOrder: ['their collisions', 'generate intense', 'earthquakes along', 'volcanic', 'mountain ranges'],
   },
   {
     id: 'fb-9',
     title: 'Renewable Energy',
     context: 'Modern wind turbines generate clean electricity using aerodynamic propeller blades.',
     targetSentence: 'They provide power without producing greenhouse gas emissions.',
-    correctOrder: ['They provide power', 'without producing', 'greenhouse gas emissions.'],
+    endingPunctuation: '.',
+    correctOrder: ['they provide', 'power without', 'producing greenhouse', 'gas', 'emissions'],
   },
   {
     id: 'fb-10',
     title: 'DNA and Genetics',
     context: 'Deoxyribonucleic acid carries the genetic instructions used in the growth of organisms.',
     targetSentence: 'Most DNA molecules consist of two biopolymer strands coiled around each other.',
-    correctOrder: ['Most DNA molecules', 'consist of two', 'biopolymer strands', 'coiled around each other.'],
+    endingPunctuation: '.',
+    correctOrder: ['most DNA molecules', 'consist of two', 'biopolymer strands', 'coiled around', 'each other'],
   },
   {
     id: 'fb-11',
     title: 'Antarctica',
     context: 'Antarctica is the southernmost continent and contains the geographic South Pole.',
-    targetSentence: 'It is the coldest, driest, and windiest continent on Earth.',
-    correctOrder: ['It is the coldest,', 'driest, and windiest', 'continent on Earth.'],
+    targetSentence: 'It is the coldest driest and windiest continent on Earth.',
+    endingPunctuation: '.',
+    correctOrder: ['it is the', 'coldest driest', 'and windiest', 'continent on', 'earth'],
   },
   {
     id: 'fb-12',
     title: 'Microscopes',
     context: 'Optical microscopes use visible light and lenses to magnify tiny biological specimens.',
     targetSentence: 'They allow scientists to observe cellular structures with great detail.',
-    correctOrder: ['They allow scientists', 'to observe cellular structures', 'with great detail.'],
+    endingPunctuation: '.',
+    correctOrder: ['they allow', 'scientists to', 'observe cellular', 'structures with', 'great detail'],
   },
 ]
 
@@ -363,7 +380,6 @@ export async function fetchBuildSentenceBatch(
 
   // If Wikipedia didn't yield enough within attempts, supplement from offline academic bank
   if (questions.length < targetCount) {
-    const needed = targetCount - questions.length
     const shuffledFallbacks = shuffleChunks([...FALLBACK_SENTENCE_QUESTIONS])
 
     for (const fb of shuffledFallbacks) {
